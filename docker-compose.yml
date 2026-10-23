@@ -4,6 +4,8 @@ name: dtc245010034
 #   frontend : mạng thường, có cổng publish ra host (chỉ Nginx).
 #   backend  : internal: true — không có đường ra Internet, không publish cổng.
 #   egress   : mạng thường, chỉ dùng cho wpcli (profile "setup") để tải theme/plugin.
+#   monitoring: internal: true — Prometheus, Grafana, cAdvisor và các exporter; không ra Internet,
+#               không publish cổng. Nginx join mạng này và proxy ra 127.0.0.1:3001/9090/8082.
 
 x-logging: &default-logging
   driver: json-file
@@ -25,6 +27,9 @@ services:
       WP_DB_NAME: ${MYSQL_DATABASE:?đặt trong .env}
       WP_DB_USER: ${MYSQL_USER:?đặt trong .env}
       WP_DB_PASSWORD: ${MYSQL_PASSWORD:?đặt trong .env}
+      # user giám sát (db/init/02-exporter-user.sh)
+      EXPORTER_DB_USER: ${MYSQL_EXPORTER_USER:?đặt trong .env}
+      EXPORTER_DB_PASSWORD: ${MYSQL_EXPORTER_PASSWORD:?đặt trong .env}
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
@@ -96,15 +101,21 @@ services:
       - "${NGINX_HTTPS_PORT:-8443}:8443"
       # phpMyAdmin chỉ qua loopback (Docker bỏ qua ufw với cổng publish)
       - "127.0.0.1:${PHPMYADMIN_PORT:-8081}:8081"
+      # công cụ giám sát: cũng chỉ loopback
+      - "127.0.0.1:${GRAFANA_PORT:-3001}:3001"
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+      - "127.0.0.1:${CADVISOR_PORT:-8082}:8082"
     volumes:
       - wp_html:/var/www/html:ro
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - ./nginx/snippets:/etc/nginx/snippets:ro
       - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/auth:/etc/nginx/auth:ro
     networks:
       - frontend
       - backend
+      - monitoring
     mem_limit: 64m
     cap_drop: [ALL]
     cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
@@ -140,6 +151,180 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    logging: *default-logging
+
+  # ---------------- Giám sát ----------------
+  prometheus:
+    image: prom/prometheus:v3.15.1
+    container_name: dtc245010034-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      # reload cấu hình từ trong container; Nginx chặn /-/quit và /-/reload (403)
+      - --web.enable-lifecycle
+    volumes:
+      - prometheus_data:/prometheus
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
+    networks:
+      - monitoring
+    mem_limit: 256m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: *default-logging
+
+  node-exporter:
+    image: prom/node-exporter:v1.12.1
+    container_name: dtc245010034-node-exporter
+    restart: unless-stopped
+    # Không dùng network_mode: host (phá cô lập mạng) → node_network_* chỉ là của netns container;
+    # CPU/RAM/đĩa/load vẫn là của host nhờ pid: host + mount / (ro).
+    pid: host
+    hostname: dtc245010034-host   # tên hiển thị trong dashboard thay cho id container
+    command:
+      - --path.rootfs=/host
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+|run/.+|snap/.+)($$|/)
+    volumes:
+      - /:/host:ro,rslave
+    networks:
+      - monitoring
+    mem_limit: 64m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9100/metrics"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:v0.60.6
+    container_name: dtc245010034-cadvisor
+    restart: unless-stopped
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=30s
+      # giữ nhãn gọn: chỉ nhãn compose cần cho truy vấn (tránh hàng chục nhãn container_label_*)
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.service,com.docker.compose.project
+      - --disable_metrics=percpu,sched,tcp,udp,advtcp,process,hugetlb,referenced_memory,resctrl,cpu_topology
+    # Đặc quyền bắt buộc: chạy root + mount (ro) /, /sys, /var/lib/docker, /var/run (docker.sock,
+    # để gắn tên/nhãn container) và /dev/disk. Không privileged. Xem README mục hardening.
+    user: root
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - monitoring
+    mem_limit: 256m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: *default-logging
+
+  # Image scratch (không shell/wget) → không có healthcheck; trạng thái theo dõi bằng metric up/nginx_up.
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:1.5.3
+    container_name: dtc245010034-nginx-exporter
+    restart: unless-stopped
+    command:
+      - --nginx.scrape-uri=http://nginx:8088/stub_status
+    networks:
+      - monitoring
+    mem_limit: 32m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  mysqld-exporter:
+    image: prom/mysqld-exporter:v0.21.0
+    container_name: dtc245010034-mysqld-exporter
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    # Mật khẩu nằm trong file cấu hình (configs), không ở command/environment → không lộ qua docker inspect.
+    command:
+      - --config.my-cnf=/etc/mysqld-exporter.cnf
+      - --mysqld.address=db:3306
+    configs:
+      - source: mysqld_exporter_cnf
+        target: /etc/mysqld-exporter.cnf
+        mode: 0444
+    networks:
+      - monitoring
+      - backend   # chỉ để tới db:3306
+    mem_limit: 64m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9104/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+
+  grafana:
+    image: grafana/grafana:13.2.4
+    container_name: dtc245010034-grafana
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?đặt trong .env}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?đặt trong .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      # Truy cập bằng http://127.0.0.1:3001 (qua Nginx); websocket /api/live kiểm tra Origin theo URL này
+      GF_SERVER_ROOT_URL: http://127.0.0.1:${GRAFANA_PORT:-3001}/
+      GF_LIVE_ALLOWED_ORIGINS: http://127.0.0.1:${GRAFANA_PORT:-3001}
+      GOMEMLIMIT: 320MiB  # ép Go GC trước khi chạm mem_limit
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - monitoring
+    # Grafana 13: anon ~220 MiB + ~150 MiB file mmap (binary) → 256m/384m chạm trần (ContainerHighMemory)
+    mem_limit: 512m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     logging: *default-logging
 
   # Chạy một lần: docker compose --profile setup run --rm wpcli   (hoặc scripts/seed.sh)
@@ -182,7 +367,19 @@ networks:
     internal: true
   egress:
     driver: bridge
+  monitoring:
+    driver: bridge
+    internal: true
+
+configs:
+  mysqld_exporter_cnf:
+    content: |
+      [client]
+      user=${MYSQL_EXPORTER_USER}
+      password=${MYSQL_EXPORTER_PASSWORD}
 
 volumes:
   db_data:
   wp_html:
+  prometheus_data:
+  grafana_data:

@@ -1,0 +1,11 @@
+apiVersion: 1
+providers:
+  - name: dtc245010034
+    orgId: 1
+    folder: dtc245010034
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

@@ -9,6 +9,9 @@ nginx/certs/*.pem
 nginx/certs/*.crt
 nginx/certs/*.csr
 
+# Basic Auth của Nginx (sinh bằng scripts/gen-htpasswd.sh)
+nginx/auth/htpasswd
+
 # Dữ liệu runtime
 *.log
 *.sql.gz

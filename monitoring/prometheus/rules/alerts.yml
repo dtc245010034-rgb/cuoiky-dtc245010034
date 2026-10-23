@@ -1,0 +1,60 @@
+groups:
+  - name: dtc245010034
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Mục tiêu {{ $labels.instance }} ngừng hoạt động"
+          description: "Prometheus không thu thập được số liệu từ {{ $labels.instance }} (job {{ $labels.job }}) trong hơn 1 phút."
+
+      - alert: HostHighCPU
+        expr: 100 - (avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "CPU máy chủ vượt 80%"
+          description: "CPU trung bình của máy chủ là {{ $value | printf \"%.1f\" }}% trong 5 phút qua."
+
+      - alert: HostHighMemory
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 85
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "RAM máy chủ vượt 85%"
+          description: "RAM đang dùng {{ $value | printf \"%.1f\" }}% tổng dung lượng."
+
+      - alert: HostDiskLow
+        expr: node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} * 100 < 15
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Ổ đĩa gốc còn dưới 15% dung lượng trống"
+          description: "Phân vùng / chỉ còn {{ $value | printf \"%.1f\" }}% dung lượng trống."
+
+      - alert: ContainerHighMemory
+        expr: |
+          (container_memory_working_set_bytes{name=~"dtc245010034-.*"}
+            / (container_spec_memory_limit_bytes{name=~"dtc245010034-.*"} > 0)) * 100 > 90
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Container {{ $labels.name }} dùng trên 90% giới hạn RAM"
+          description: "Container {{ $labels.name }} đang dùng {{ $value | printf \"%.1f\" }}% mem_limit; có nguy cơ bị OOM-kill."
+
+      - alert: MySQLDown
+        expr: mysql_up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "MySQL không phản hồi"
+          description: "mysqld-exporter không kết nối được tới MySQL trong hơn 1 phút; website có thể lỗi kết nối cơ sở dữ liệu."
+
+      - alert: NginxDown
+        expr: nginx_up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Nginx không phản hồi"
+          description: "Exporter không đọc được stub_status của Nginx trong hơn 1 phút; website có thể không truy cập được."

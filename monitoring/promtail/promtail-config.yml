@@ -30,18 +30,16 @@ scrape_configs:
       - source_labels: [__meta_docker_container_log_stream]
         target_label: stream
     pipeline_stages:
-      # Nginx: access log là JSON; status/method có cardinality thấp nên làm label,
-      # uri/remote_addr... giữ trong dòng log (dùng | json khi truy vấn).
+      # Nginx: access log là JSON; chỉ `status` (tập giá trị nhỏ) làm label. method/uri/remote_addr
+      # do client gửi nên KHÔNG làm label (tránh bùng nổ cardinality); giữ trong dòng log, dùng | json.
       - match:
           selector: '{service="nginx"} |= "\"status\":"'
           stages:
             - json:
                 expressions:
                   status: status
-                  method: method
             - labels:
                 status:
-                method:
       # WordPress: dòng audit do mu-plugin ghi có tiền tố "[ngày giờ UTC] " của PHP; bóc phần JSON
       # để truy vấn "| json" hoạt động.
       - match:

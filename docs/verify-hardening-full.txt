@@ -1,0 +1,130 @@
+# Kết quả scripts/verify-hardening.sh (chế độ đầy đủ) — chạy ngày 2026-10-24 00:00
+# Dùng làm phụ lục báo cáo. Không chứa mật khẩu.
+
+
+== 1. Non-root / quyền tiến trình
+PASS  db chạy non-root (uid 999)
+PASS  wordpress chạy non-root (uid 33)
+PASS  nginx chạy non-root (uid 101)
+PASS  grafana chạy non-root (uid 472)
+PASS  prometheus chạy non-root (uid 65534)
+PASS  loki chạy non-root (uid 10001)
+PASS  promtail chạy non-root (uid 10001)
+PASS  docker-socket-proxy chạy non-root (uid 65534)
+PASS  node-exporter chạy non-root (uid 65534)
+PASS  mysqld-exporter chạy non-root (uid 65534)
+PASS  nginx-exporter chạy non-root (uid 1001)
+INFO  cAdvisor chạy root (ngoại lệ): cần đọc cgroup và metadata Docker của host qua mount chỉ-đọc
+INFO  phpMyAdmin chạy root (ngoại lệ): image Apache; chỉ ở mạng backend internal, truy cập qua loopback + ACL
+PASS  wordpress: cap_drop ALL, không cap_add, no-new-privileges
+PASS  nginx: cap_drop ALL, không cap_add, no-new-privileges
+PASS  grafana: cap_drop ALL, không cap_add, no-new-privileges
+PASS  loki: cap_drop ALL, không cap_add, no-new-privileges
+PASS  promtail: cap_drop ALL, không cap_add, no-new-privileges
+PASS  docker-socket-proxy: cap_drop ALL, không cap_add, no-new-privileges
+PASS  nginx-exporter: cap_drop ALL, không cap_add, no-new-privileges
+PASS  mysqld-exporter: cap_drop ALL, không cap_add, no-new-privileges
+PASS  loki: rootfs read-only (true)
+PASS  promtail: rootfs read-only (true)
+PASS  docker-socket-proxy: rootfs read-only (true)
+PASS  không container nào privileged (0)
+PASS  Nginx dùng image unprivileged (nginxinc/nginx-unprivileged)
+
+== 2. Mạng
+PASS  frontend subnet cố định (10.250.10.0/24 internal=false)
+PASS  backend internal (10.250.20.0/24 internal=true)
+PASS  monitoring internal (10.250.30.0/24 internal=true)
+PASS  dockerapi internal (10.250.250.0/29 internal=true)
+PASS  db chỉ ở mạng backend (dtc245010034_backend)
+PASS  ngoài nginx không container nào publish cổng (0)
+PASS  cổng quản trị chỉ bind 127.0.0.1 (8080/8443 mở ngoài) (1)
+PASS  wordpress không có đường ra Internet
+PASS  cổng 8081 không truy cập được qua IP LAN 10.132.54.100 (000)
+PASS  cổng 3001 không truy cập được qua IP LAN 10.132.54.100 (000)
+PASS  cổng 9090 không truy cập được qua IP LAN 10.132.54.100 (000)
+PASS  cổng 8082 không truy cập được qua IP LAN 10.132.54.100 (000)
+PASS  cổng 3100 không truy cập được qua IP LAN 10.132.54.100 (000)
+
+== 3. Secrets
+PASS  secrets/ chmod 700 (700)
+PASS  secrets/ bị git bỏ qua
+PASS  .env không còn biến *PASSWORD* (0)
+PASS  docker inspect 14 container không lộ mật khẩu (0)
+PASS  docker compose config không chứa mật khẩu (0)
+PASS  nginx (uid 101) đọc được /run/secrets/tls_key
+PASS  nginx (uid 101) đọc được /run/secrets/nginx_htpasswd
+PASS  db (uid 999) đọc được /run/secrets/mysql_root_password
+PASS  wordpress (uid 33) đọc được /run/secrets/mysql_password
+PASS  grafana (uid 472) đọc được /run/secrets/grafana_admin_password
+
+== 4. Quyền DB
+PASS  không user nào host '%' (0)
+PASS  root chỉ localhost (localhost)
+PASS  wp_user và exporter gắn subnet backend (2)
+PASS  wp_user không có ALL PRIVILEGES/GRANT OPTION
+PASS  wp_user chỉ thấy DB wordpress (dbs=information_schema,performance_schema,wordpress,)
+PASS  wp_user không đọc được mysql.user
+PASS  wp_user không tạo được DB
+PASS  exporter chỉ PROCESS, REPLICATION CLIENT, SELECT performance_schema
+PASS  mysql_up (Prometheus) (1)
+
+== 5. Nginx (headers / 301 / TLS / 429 / 403)
+PASS  HTTPS trang chủ (200)
+PASS  header X-Frame-Options
+PASS  header X-Content-Type-Options
+PASS  header Referrer-Policy
+PASS  header Strict-Transport-Security
+PASS  header Permissions-Policy
+PASS  header Content-Security-Policy
+PASS  Server không lộ phiên bản (nginx)
+PASS  HTTP 8080 → 301 sang HTTPS (301 https://localhost:8443/abc?x=1)
+PASS  TLS 1.2 được chấp nhận
+PASS  TLS 1.1 bị từ chối
+PASS  chứng chỉ tự ký còn hạn > 30 ngày (yes)
+PASS  limit_req /wp-login.php trả 429 (200 200 429 429 429 429 429 )
+PASS  /xmlrpc.php bị ngắt (444) (000)
+PASS  /wp-config.php (404)
+PASS  /.git/config (404)
+PASS  /.env (404)
+PASS  /readme.html (404)
+PASS  /wp-content/uploads/test.php (403)
+PASS  file tĩnh có đúng 1 header Cache-Control (1)
+PASS  từ container wordpress → nginx:8081/ (403)
+PASS  từ container wordpress → nginx:3001/ (403)
+PASS  từ container wordpress → nginx:9090/ (403)
+PASS  từ container wordpress → nginx:8082/ (403)
+PASS  từ container wordpress → nginx:3100/ready (403)
+PASS  từ container wordpress → nginx:8088/stub_status (403)
+PASS  nginx-exporter đọc được stub_status (nginx_up) (1)
+
+== 6. Prometheus / Loki / cAdvisor / Grafana — xác thực
+PASS  Prometheus không auth (401)
+PASS  Prometheus có auth (200)
+PASS  Prometheus POST /-/quit (403)
+PASS  Prometheus POST /-/reload (403)
+PASS  cAdvisor không auth (401)
+PASS  cAdvisor có auth (200)
+PASS  Loki /ready không auth (401)
+PASS  Loki /ready có auth (200)
+PASS  Loki POST push (403)
+PASS  Loki /config (403)
+PASS  Grafana chưa đăng nhập → /login (302 /login)
+PASS  Grafana đăng nhập admin (200)
+PASS  Grafana từ chối admin/admin (401)
+PASS  Prometheus targets UP (7/7)
+
+== 7. docker-socket-proxy
+PASS  GET /containers/json (200)
+PASS  GET /containers/<id>/json (200)
+PASS  GET /networks (200)
+PASS  GET /networks/<id> (403)
+PASS  GET /images/json (403)
+PASS  GET /containers/<id>/archive (403)
+PASS  POST /containers/create (403)
+PASS  POST /containers/<id>/exec (403)
+PASS  DELETE /containers/<id> (403)
+PASS  promtail không mount docker.sock
+PASS  proxy mount docker.sock chỉ-đọc (false)
+PASS  proxy chỉ nối mạng dockerapi (dtc245010034_dockerapi)
+
+== Tổng kết: 109 PASS, 0 FAIL

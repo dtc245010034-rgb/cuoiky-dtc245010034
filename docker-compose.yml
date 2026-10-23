@@ -100,7 +100,7 @@ services:
     logging: *default-logging
 
   nginx:
-    image: nginx:1.30.6-alpine
+    image: nginxinc/nginx-unprivileged:1.30.6-alpine   # non-root (uid 101), nghe 8080/8443 trong container
     container_name: dtc245010034-nginx
     restart: unless-stopped
     depends_on:
@@ -134,7 +134,6 @@ services:
       - monitoring
     mem_limit: 64m
     cap_drop: [ALL]
-    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
     security_opt:
       - no-new-privileges:true
     healthcheck:

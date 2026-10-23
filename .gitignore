@@ -1,0 +1,31 @@
+# Bí mật — KHÔNG commit
+.env
+*.env
+!.env.example
+
+# Chứng chỉ / khoá riêng (giữ .gitkeep)
+nginx/certs/*.key
+nginx/certs/*.pem
+nginx/certs/*.crt
+nginx/certs/*.csr
+
+# Dữ liệu runtime
+*.log
+*.sql.gz
+*.sql.bak
+backups/
+
+# Ảnh/video nặng (ảnh PNG minh chứng vẫn được commit)
+docs/screenshots/*.gif
+docs/screenshots/*.mp4
+docs/screenshots/*.mov
+docs/screenshots/raw/
+
+# File tạm của Office
+~$*
+.~lock.*
+
+# Khác
+.DS_Store
+__pycache__/
+*.swp

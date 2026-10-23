@@ -23,6 +23,8 @@ Internet/LAN ──8080 (301)──┐
 - `frontend`: mạng thường, chỉ Nginx có cổng publish.
 - `backend`: `internal: true` — db, wordpress, phpmyadmin, nginx; không có đường ra Internet, MySQL không publish cổng.
 - `monitoring`: `internal: true` — prometheus, grafana, cadvisor, node-exporter, nginx-exporter, mysqld-exporter và nginx. Chỉ `mysqld-exporter` nối thêm `backend` (để tới `db:3306`); db không bao giờ vào mạng `monitoring`.
+- `dockerapi`: `internal: true`, subnet cố định `10.250.250.0/29` — chỉ `docker-socket-proxy` và `promtail`.
+- `monitoring` còn có thêm `loki` và `promtail` (log tập trung).
 - `egress`: chỉ dùng cho container `wpcli` (profile `setup`) khi tải theme/plugin lúc cài đặt.
 - Mã WordPress nằm trong volume `wp_html`, dùng chung (Nginx gắn `:ro`) để Nginx phục vụ file tĩnh.
 
@@ -30,7 +32,7 @@ Stack: WordPress (php-fpm) · MySQL · phpMyAdmin · Nginx (HTTPS tự ký) · P
 
 ## Yêu cầu
 - Docker Engine + Docker Compose v2 (`docker compose`)
-- ≥ 4 GB RAM, ≥ 15 GB đĩa trống; cổng 8080, 8443, 8081, 3001, 9090, 8082 còn trống
+- ≥ 4 GB RAM, ≥ 15 GB đĩa trống; cổng 8080, 8443, 8081, 3001, 9090, 8082, 3100 còn trống
 - `openssl`, `python3` (chỉ khi muốn sinh lại ảnh minh họa)
 
 ## Cài đặt nhanh
@@ -44,11 +46,13 @@ for k in MYSQL_ROOT_PASSWORD MYSQL_PASSWORD WP_ADMIN_PASSWORD GRAFANA_ADMIN_PASS
          MYSQL_EXPORTER_PASSWORD MONITOR_BASIC_PASSWORD; do
   sed -i "s|^$k=.*|$k=$(openssl rand -base64 33 | tr -d '/+=\n' | cut -c1-24)|" .env
 done
+# GID của group docker (docker-socket-proxy chạy non-root cần để đọc docker.sock)
+sed -i "s|^DOCKER_GID=.*|DOCKER_GID=$(getent group docker | cut -d: -f3)|" .env
 
 # 2. Chứng chỉ TLS tự ký (RSA 2048, CN=localhost, SAN)
 scripts/gen-cert.sh
 
-# 3. Basic Auth cho Prometheus/cAdvisor, rồi khởi động toàn bộ stack
+# 3. Basic Auth cho Prometheus/cAdvisor/Loki, rồi khởi động toàn bộ stack
 scripts/gen-htpasswd.sh
 docker compose up -d
 docker compose ps                  # tất cả phải "healthy"
@@ -76,8 +80,8 @@ Chỉ Nginx 8080/8443 mở ra ngoài; mọi công cụ quản trị bind `127.0.
 | Grafana (qua Nginx) | http://127.0.0.1:3001 | `GRAFANA_ADMIN_USER` (`phuc_grafana`) / `GRAFANA_ADMIN_PASSWORD` |
 | Prometheus (qua Nginx) | http://127.0.0.1:9090 | Basic Auth `MONITOR_BASIC_USER` / `MONITOR_BASIC_PASSWORD` |
 | cAdvisor (qua Nginx) | http://127.0.0.1:8082 | Basic Auth như Prometheus |
-| Loki | http://127.0.0.1:3100 | _(đang cập nhật)_ |
-| node / mysqld / nginx exporter | không publish (chỉ mạng `monitoring`) | — |
+| Loki (qua Nginx, chỉ đọc) | http://127.0.0.1:3100 | Basic Auth như Prometheus |
+| node / mysqld / nginx exporter, Promtail | không publish (chỉ mạng `monitoring`) | — |
 
 ## Hardening
 - **Cô lập mạng**: `backend` là `internal: true`; WordPress/MySQL/phpMyAdmin không có đường ra Internet. MySQL không publish cổng.
@@ -90,6 +94,8 @@ Chỉ Nginx 8080/8443 mở ra ngoài; mọi công cụ quản trị bind `127.0.
 - `stub_status` ở cổng nội bộ 8088 (không publish), chỉ cho dải mạng riêng.
 - **Giám sát**: Prometheus/cAdvisor sau Basic Auth của Nginx; Nginx trả 403 cho `/-/quit` và `/-/reload` của Prometheus; Grafana tắt đăng ký, truy cập ẩn danh, Gravatar, analytics và kiểm tra cập nhật, tài khoản quản trị không dùng tên `admin`; mật khẩu `mysqld-exporter` nằm trong file cấu hình (không lộ qua `docker inspect`); user MySQL `exporter` chỉ có `PROCESS, REPLICATION CLIENT` và `SELECT` trên `performance_schema`, giới hạn 3 kết nối.
 - **Ngoại lệ đặc quyền của cAdvisor** (bắt buộc để đọc số liệu cgroup/Docker): chạy root, mount chỉ-đọc `/`, `/sys`, `/var/lib/docker`, `/var/run` (có `docker.sock`) và `/dev/disk`; không dùng `privileged`. node-exporter dùng `pid: host` và mount `/` chỉ-đọc nhưng chạy user `nobody`.
+
+- **Log tập trung**: Promtail đọc log qua Docker API qua `docker-socket-proxy` (không mount `docker.sock` hay `/var/lib/docker/containers`); proxy chạy non-root, `read_only`, `cap_drop: ALL`, chỉ cho `GET` vài đường dẫn đọc (container list/inspect/logs, networks, ping, version) — `archive`, `export`, `attach`, `images`, `exec` và mọi `POST/PUT/DELETE` trả 403. Mount `docker.sock:ro` thì KHÔNG giới hạn được Docker API (chỉ chặn ghi file socket). `GET /networks` (chỉ danh sách) được mở vì `docker_sd_configs` của Promtail gọi nó để tính nhãn mạng của container — thiếu thì Promtail báo `Forbidden` và không phát hiện được container nào; `GET /networks/<id>` vẫn bị 403. Lưu ý còn lại: `GET /containers/{id}/json` vẫn trả biến môi trường của container, nên mạng `dockerapi` chỉ có Promtail. Loki/Promtail `cap_drop: ALL`, `read_only`, chạy uid 10001; Loki ra host qua Nginx với Basic Auth và allowlist chỉ đọc (push/delete → 403).
 
 ## Giám sát & Log
 ### Giám sát (Prometheus + Grafana)
@@ -111,8 +117,37 @@ rate(nginx_http_requests_total[1m])                                        # yê
 rate(mysql_global_status_queries[1m])                                      # truy vấn/giây của MySQL
 ```
 
-### Log
-_(đang cập nhật)_
+### Log tập trung (Loki + Promtail)
+```
+container (stdout/stderr) ──Docker API (GET)──► docker-socket-proxy ──► promtail ──push──► loki ◄── grafana (datasource `loki`)
+  [dockerapi, internal]                          [dockerapi]           [dockerapi+monitoring]   [monitoring]
+127.0.0.1:3100 (Basic Auth, chỉ đọc) ──► nginx ──► loki
+```
+- **Loki 3.7.9** chạy một tiến trình, lưu filesystem (schema v13/tsdb), giữ **7 ngày** (compactor). Image Loki là distroless (không shell) — cố ý giữ nguyên, nên Loki **không có healthcheck** (như `nginx-exporter`); trạng thái theo dõi bằng `up{job="loki"}` và rule `TargetDown` trong Prometheus. Container một lần `log-init` chỉ `chown` volume positions cho Promtail (user non-root).
+- **Promtail 3.6.11** là tag 3.x cuối cùng còn tồn tại; Promtail đã deprecated/hết hỗ trợ, sản phẩm thay thế là **Grafana Alloy**. Chỉ lấy container của project (`com.docker.compose.project=dtc245010034`). Nhãn Loki: `container`, `service` (tên service compose), `stream` (stdout/stderr); riêng log Nginx thêm `status`, `method` (cardinality thấp). `uri`, `remote_addr`, `ip`... giữ trong dòng log, lọc bằng `| json`.
+- **Nginx** ghi access log JSON (`log_format json_combined`) ra stdout; error log ra stderr.
+- **Audit đăng nhập WordPress**: mu-plugin `seed/mu-plugins/auth-audit.php` ghi một dòng JSON (`event` = `LOGIN_OK`/`LOGIN_FAIL`, `user`, `ip`, `ts`) ra `error_log` → stderr của php-fpm (image đã bật `catch_workers_output`, `decorate_workers_output = no`). Không ghi mật khẩu. IP lấy từ `REMOTE_ADDR` do Nginx đặt; truy cập từ chính máy chủ qua cổng đã publish có thể hiện IP gateway Docker (`172.x.0.1`), còn truy cập qua IP LAN hiện IP LAN. `scripts/seed.sh` cài mu-plugin (chạy lại được).
+- **Cảnh báo log**: Loki ruler đánh giá `monitoring/loki/rules/fake/alerts.yml` (`WordPressLoginFailBurst`: hơn 5 `LOGIN_FAIL` trong 5 phút từ một IP). Không có Alertmanager nên chỉ hiển thị trạng thái: Grafana → Alerting → Alert rules (datasource Loki, `manageAlerts: true`), panel "Cảnh báo Loki" của dashboard, hoặc `GET /prometheus/api/v1/alerts` qua cổng 3100.
+- Tạo lại cảnh báo để thử/chụp ảnh: `scripts/login-fail-burst.sh` (7 lần đăng nhập sai cách 13 s, dùng tên/mật khẩu giả; đợi ~1 phút để rule đánh giá).
+- Grafana: datasource **Loki** (uid `loki`) và dashboard **Nhật ký dtc245010034** (panel Logs, tốc độ request Nginx theo status, top URI lỗi, LOGIN_FAIL theo IP, cảnh báo) nạp bằng file provisioning.
+- Prometheus thu thêm job `loki` và `promtail` (tổng 7 target).
+
+Truy cập Loki từ máy chủ (Basic Auth như Prometheus; chỉ đọc, `POST`/push/delete → 403):
+```bash
+curl -s -u "$MONITOR_BASIC_USER:$MONITOR_BASIC_PASSWORD" http://127.0.0.1:3100/ready
+scripts/logql-demo.sh 1h        # chạy 8 truy vấn LogQL mẫu bên dưới (đọc Basic Auth từ .env)
+```
+
+LogQL mẫu:
+```logql
+{service="nginx", stream="stdout"} | json | method="GET"                       # request GET
+{service="nginx", stream="stdout"} | json | status >= 400                      # lỗi 4xx/5xx
+{service=~".+"} |~ "(?i)error"                                                 # chữ "error" toàn project
+sum by (status) (rate({service="nginx", stream="stdout"}[1m]))                 # req/s theo status
+sum by (ip) (count_over_time({service="wordpress"} |= "LOGIN_FAIL" | json [5m]))  # đăng nhập sai theo IP
+{service="nginx", stream="stdout"} | json | status = 429 | uri =~ "/wp-login.php.*" # bị rate limit
+{service="db"}                                                                 # log MySQL
+```
 
 ## Minh chứng
 Xem `docs/screenshots/`.

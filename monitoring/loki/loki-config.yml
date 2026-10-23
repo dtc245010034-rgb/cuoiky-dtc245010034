@@ -1,0 +1,92 @@
+# Loki 3.x — single binary, lưu trên filesystem, giữ log 7 ngày. Không xác thực nội bộ
+# (chỉ nằm trong mạng monitoring internal; truy cập từ host qua Nginx có Basic Auth, chỉ đọc).
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /etc/loki/rules
+
+schema_config:
+  configs:
+    - from: "2024-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+
+ingester:
+  chunk_idle_period: 30m
+  max_chunk_age: 2h
+  chunk_target_size: 1048576
+
+# Retention 7 ngày do compactor xóa chunk/index cũ.
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+  retention_delete_delay: 2h
+  compaction_interval: 10m
+
+limits_config:
+  discover_service_name: []   # không tự thêm nhãn service_name (đã có nhãn service)
+  retention_period: 168h
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+  ingestion_rate_mb: 4
+  ingestion_burst_size_mb: 8
+  per_stream_rate_limit: 3MB
+  per_stream_rate_limit_burst: 6MB
+  max_streams_per_user: 2000
+  max_query_series: 500
+  max_entries_limit_per_query: 5000
+  query_timeout: 60s
+
+# Bộ đệm nhỏ cho máy 7,7 GB RAM.
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 32
+
+chunk_store_config:
+  chunk_cache_config:
+    embedded_cache:
+      enabled: true
+      max_size_mb: 64
+
+# Ruler: đánh giá rule LogQL (monitoring/loki/rules/fake/*.yml, "fake" là tenant khi auth_enabled=false).
+# Không có Alertmanager trong stack: trạng thái cảnh báo xem trong Grafana Alerting / API ruler.
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /etc/loki/rules
+  rule_path: /tmp/loki-rules
+  enable_api: true
+  ring:
+    kvstore:
+      store: inmemory
+
+analytics:
+  reporting_enabled: false

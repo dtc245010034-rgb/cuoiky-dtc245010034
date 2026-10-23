@@ -1,0 +1,53 @@
+# Promtail 3.6.11 — tag 3.x cuối cùng còn tồn tại; Promtail đã deprecated/hết hỗ trợ,
+# sản phẩm thay thế là Grafana Alloy. Đọc log qua Docker API (docker-socket-proxy), KHÔNG mount
+# docker.sock hay /var/lib/docker/containers.
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  filename: /positions/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: tcp://docker-socket-proxy:2375
+        refresh_interval: 15s
+        filters:
+          # chỉ container của project này
+          - name: label
+            values: ["com.docker.compose.project=dtc245010034"]
+    relabel_configs:
+      - source_labels: [__meta_docker_container_name]
+        regex: "/(.*)"
+        target_label: container
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service]
+        target_label: service
+      - source_labels: [__meta_docker_container_log_stream]
+        target_label: stream
+    pipeline_stages:
+      # Nginx: access log là JSON; status/method có cardinality thấp nên làm label,
+      # uri/remote_addr... giữ trong dòng log (dùng | json khi truy vấn).
+      - match:
+          selector: '{service="nginx"} |= "\"status\":"'
+          stages:
+            - json:
+                expressions:
+                  status: status
+                  method: method
+            - labels:
+                status:
+                method:
+      # WordPress: dòng audit do mu-plugin ghi có tiền tố "[ngày giờ UTC] " của PHP; bóc phần JSON
+      # để truy vấn "| json" hoạt động.
+      - match:
+          selector: '{service="wordpress"} |= "\"event\":\"LOGIN_"'
+          stages:
+            - regex:
+                expression: '(?P<audit>\{.*\})'
+            - output:
+                source: audit

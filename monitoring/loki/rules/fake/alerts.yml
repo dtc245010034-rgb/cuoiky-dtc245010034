@@ -1,0 +1,12 @@
+groups:
+  - name: dtc245010034-logs
+    interval: 1m
+    rules:
+      - alert: WordPressLoginFailBurst
+        expr: sum by (ip) (count_over_time({service="wordpress"} |= "LOGIN_FAIL" | json [5m])) > 5
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Đăng nhập WordPress thất bại nhiều lần từ {{ $labels.ip }}"
+          description: "Hơn 5 lần LOGIN_FAIL trong 5 phút từ IP {{ $labels.ip }}; có thể là dò mật khẩu."

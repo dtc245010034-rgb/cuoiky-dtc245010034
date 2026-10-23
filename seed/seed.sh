@@ -44,6 +44,7 @@ if $WP plugin is-installed woocommerce 2>/dev/null || $WP plugin install woocomm
 fi
 
 mkdir -p /var/www/html/wp-content/mu-plugins
+cp /seed/mu-plugins/auth-audit.php /var/www/html/wp-content/mu-plugins/auth-audit.php
 
 # --- 4. Ảnh ---
 step "Nạp ảnh vào thư viện media"

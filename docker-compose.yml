@@ -6,6 +6,8 @@ name: dtc245010034
 #   egress   : mạng thường, chỉ dùng cho wpcli (profile "setup") để tải theme/plugin.
 #   monitoring: internal: true — Prometheus, Grafana, cAdvisor và các exporter; không ra Internet,
 #               không publish cổng. Nginx join mạng này và proxy ra 127.0.0.1:3001/9090/8082.
+#   dockerapi : internal: true, subnet cố định — chỉ docker-socket-proxy và promtail (đọc log qua Docker API).
+#               Loki và Promtail nằm thêm trong monitoring; Nginx proxy Loki ra 127.0.0.1:3100 (chỉ đọc).
 
 x-logging: &default-logging
   driver: json-file
@@ -105,6 +107,7 @@ services:
       - "127.0.0.1:${GRAFANA_PORT:-3001}:3001"
       - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
       - "127.0.0.1:${CADVISOR_PORT:-8082}:8082"
+      - "127.0.0.1:${LOKI_PORT:-3100}:3100"
     volumes:
       - wp_html:/var/www/html:ro
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
@@ -327,6 +330,126 @@ services:
       start_period: 30s
     logging: *default-logging
 
+  # ---------------- Log tập trung ----------------
+  # Mount docker.sock ":ro" KHÔNG giới hạn Docker API (ro chỉ chặn ghi vào file socket; mọi lệnh API
+  # vẫn chạy được, kể cả tạo container). Proxy này chỉ cho GET vài đường dẫn đọc; mạng dockerapi
+  # là internal và chỉ nối promtail.
+  docker-socket-proxy:
+    image: wollomatic/socket-proxy:1.13.1
+    container_name: dtc245010034-docker-socket-proxy
+    restart: unless-stopped
+    user: "65534:${DOCKER_GID:?đặt trong .env (getent group docker | cut -d: -f3)}"
+    command:
+      - -listenip=0.0.0.0
+      - -allowfrom=10.250.250.0/29
+      - -allowhealthcheck
+      - -loglevel=INFO
+    environment:
+      # Chỉ GET: ping, version, danh sách container, inspect và log của 1 container, danh sách mạng
+      # (docker_sd của Promtail gọi GET /networks để tính nhãn mạng; không có thì SD báo Forbidden).
+      # Chặn: archive, export, attach, exec, images, volumes, ... và mọi POST/PUT/DELETE.
+      SP_ALLOW_GET: '/(v1\.[0-9]+/)?(_ping|version|networks|containers/json|containers/[0-9a-zA-Z_.-]+/(json|logs))'
+      SP_ALLOW_HEAD: '/(v1\.[0-9]+/)?_ping'
+      # Method khác: regex không bao giờ khớp → trả 403 (bỏ trống thì proxy trả 405).
+      SP_ALLOW_POST: '/deny-all'
+      SP_ALLOW_PUT: '/deny-all'
+      SP_ALLOW_DELETE: '/deny-all'
+      SP_ALLOW_PATCH: '/deny-all'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - dockerapi
+    read_only: true
+    mem_limit: 32m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "/healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    logging: *default-logging
+
+  # Chạy một lần: cấp quyền ghi volume positions cho Promtail (user non-root 10001). Dùng lại image
+  # Promtail (đã có bash/chown) nên không thêm image nào; không mạng, rootfs read-only, chỉ cap CHOWN.
+  log-init:
+    image: grafana/promtail:3.6.11
+    container_name: dtc245010034-log-init
+    restart: "no"
+    user: root
+    entrypoint: ["bash", "-c", "chown 10001:10001 /positions"]
+    volumes:
+      - promtail_positions:/positions
+    network_mode: none
+    read_only: true
+    mem_limit: 16m
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt:
+      - no-new-privileges:true
+
+  # Image Loki là distroless (không shell/wget/curl) — cố ý, không nhét công cụ vào để có healthcheck.
+  # Như nginx-exporter: không healthcheck; theo dõi bằng up{job="loki"} + rule TargetDown trong Prometheus.
+  loki:
+    image: grafana/loki:3.7.9
+    container_name: dtc245010034-loki
+    restart: unless-stopped
+    command:
+      - -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - loki_data:/loki
+      - ./monitoring/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - ./monitoring/loki/rules:/etc/loki/rules:ro
+    networks:
+      - monitoring
+    read_only: true
+    tmpfs:
+      - /tmp   # rule_path của ruler
+    mem_limit: 256m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  # Promtail đã deprecated (EOL) — 3.6.11 là tag 3.x cuối cùng; thay thế: Grafana Alloy.
+  promtail:
+    image: grafana/promtail:3.6.11
+    container_name: dtc245010034-promtail
+    restart: unless-stopped
+    user: "10001:10001"
+    depends_on:
+      log-init:
+        condition: service_completed_successfully
+      loki:
+        condition: service_started   # Loki không có healthcheck (distroless); Promtail tự thử lại khi push
+      docker-socket-proxy:
+        condition: service_healthy
+    command:
+      - -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - promtail_positions:/positions
+      - ./monitoring/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+    networks:
+      - dockerapi
+      - monitoring
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 128m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # image không có wget/curl nhưng có bash: gửi GET /ready qua /dev/tcp
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9080 && printf 'GET /ready HTTP/1.0\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200 '"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging: *default-logging
+
   # Chạy một lần: docker compose --profile setup run --rm wpcli   (hoặc scripts/seed.sh)
   # Nối thêm mạng egress để tải theme/plugin, ghi vào volume wp_html dùng chung.
   wpcli:
@@ -370,6 +493,13 @@ networks:
   monitoring:
     driver: bridge
     internal: true
+  # Chỉ docker-socket-proxy và promtail; subnet cố định để proxy allowlist theo CIDR.
+  dockerapi:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.250.250.0/29
 
 configs:
   mysqld_exporter_cnf:
@@ -383,3 +513,5 @@ volumes:
   wp_html:
   prometheus_data:
   grafana_data:
+  loki_data:
+  promtail_positions:

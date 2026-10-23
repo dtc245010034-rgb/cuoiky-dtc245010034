@@ -13,8 +13,9 @@ if $WP core is-installed 2>/dev/null; then
 else
   $WP core install \
     --url="$WP_SITE_URL" --title="$WP_SITE_TITLE" \
-    --admin_user="$WP_ADMIN_USER" --admin_password="$WP_ADMIN_PASSWORD" \
-    --admin_email="$WP_ADMIN_EMAIL" --skip-email
+    --admin_user="$WP_ADMIN_USER" --prompt=admin_password \
+    --admin_email="$WP_ADMIN_EMAIL" --skip-email \
+    < /run/secrets/wp_admin_password
 fi
 
 $WP option update blogdescription "Thiết bị nhà thông minh: âm thanh, chiếu sáng, phụ kiện"

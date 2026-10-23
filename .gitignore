@@ -3,6 +3,9 @@
 *.env
 !.env.example
 
+# Docker secrets (mật khẩu, khóa TLS, htpasswd) — sinh bằng scripts/gen-secrets.sh
+secrets/
+
 # Chứng chỉ / khoá riêng (giữ .gitkeep)
 nginx/certs/*.key
 nginx/certs/*.pem

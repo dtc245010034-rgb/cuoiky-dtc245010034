@@ -9,6 +9,10 @@ name: dtc245010034
 #   dockerapi : internal: true, subnet cố định — chỉ docker-socket-proxy và promtail (đọc log qua Docker API).
 #               Loki và Promtail nằm thêm trong monitoring; Nginx proxy Loki ra 127.0.0.1:3100 (chỉ đọc).
 
+# Bí mật: Docker secrets dạng file (secrets/, sinh bằng scripts/gen-secrets.sh) mount tại /run/secrets.
+# Compose không dùng Swarm nên đây là bind mount file KHÔNG mã hóa; lợi ích là mật khẩu không nằm trong
+# environment/argv nên không lộ qua docker inspect, docker compose config hay log.
+
 x-logging: &default-logging
   driver: json-file
   options:
@@ -21,22 +25,26 @@ services:
     container_name: dtc245010034-db
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?đặt trong .env}
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root_password
       # root chỉ đăng nhập qua localhost trong container
       MYSQL_ROOT_HOST: localhost
       # Không dùng MYSQL_DATABASE/MYSQL_USER của image (sẽ cấp ALL PRIVILEGES);
       # db/init/01-wordpress-user.sh tạo DB + user với quyền tối thiểu.
       WP_DB_NAME: ${MYSQL_DATABASE:?đặt trong .env}
       WP_DB_USER: ${MYSQL_USER:?đặt trong .env}
-      WP_DB_PASSWORD: ${MYSQL_PASSWORD:?đặt trong .env}
-      # user giám sát (db/init/02-exporter-user.sh)
+      # user giám sát (db/init/02-exporter-user.sh); mật khẩu các user đọc từ /run/secrets
       EXPORTER_DB_USER: ${MYSQL_EXPORTER_USER:?đặt trong .env}
-      EXPORTER_DB_PASSWORD: ${MYSQL_EXPORTER_PASSWORD:?đặt trong .env}
+      # wp_user và exporter chỉ đăng nhập được từ subnet backend (không dùng host '%')
+      DB_CLIENT_SUBNET: ${BACKEND_SUBNET:-10.250.20.0/24}
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --innodb-buffer-pool-size=128M
       - --max-connections=50
+    secrets:
+      - mysql_root_password
+      - mysql_password
+      - mysql_exporter_password
     volumes:
       - db_data:/var/lib/mysql
       - ./db/init:/docker-entrypoint-initdb.d:ro
@@ -64,13 +72,15 @@ services:
       WORDPRESS_DB_HOST: ${WORDPRESS_DB_HOST:-db:3306}
       WORDPRESS_DB_NAME: ${MYSQL_DATABASE}
       WORDPRESS_DB_USER: ${MYSQL_USER}
-      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD}
+      WORDPRESS_DB_PASSWORD_FILE: /run/secrets/mysql_password
       WORDPRESS_CONFIG_EXTRA: |
         define('DISALLOW_FILE_EDIT', true);
         define('FORCE_SSL_ADMIN', true);
         define('WP_HOME', 'https://localhost:${NGINX_HTTPS_PORT:-8443}');
         define('WP_SITEURL', 'https://localhost:${NGINX_HTTPS_PORT:-8443}');
         define('WP_MEMORY_LIMIT', '256M');
+    secrets:
+      - mysql_password
     volumes:
       - wp_html:/var/www/html
       - ./wordpress/uploads.ini:/usr/local/etc/php/conf.d/zz-uploads.ini:ro
@@ -113,8 +123,11 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - ./nginx/snippets:/etc/nginx/snippets:ro
-      - ./nginx/certs:/etc/nginx/certs:ro
-      - ./nginx/auth:/etc/nginx/auth:ro
+      - ./nginx/certs/server.crt:/etc/nginx/certs/server.crt:ro
+    # Khóa TLS và htpasswd là secrets (không còn bind mount thư mục có khóa chmod 600 của user host)
+    secrets:
+      - tls_key
+      - nginx_htpasswd
     networks:
       - frontend
       - backend
@@ -267,14 +280,13 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    # Mật khẩu nằm trong file cấu hình (configs), không ở command/environment → không lộ qua docker inspect.
+    # Mật khẩu nằm trong file cấu hình (secret), không ở command/environment → không lộ qua docker inspect.
     command:
       - --config.my-cnf=/etc/mysqld-exporter.cnf
       - --mysqld.address=db:3306
-    configs:
+    secrets:
       - source: mysqld_exporter_cnf
         target: /etc/mysqld-exporter.cnf
-        mode: 0444
     networks:
       - monitoring
       - backend   # chỉ để tới db:3306
@@ -299,7 +311,7 @@ services:
         condition: service_healthy
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?đặt trong .env}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?đặt trong .env}
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password   # chỉ có tác dụng khi khởi tạo DB lần đầu
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_SECURITY_DISABLE_GRAVATAR: "true"
@@ -311,6 +323,8 @@ services:
       GF_SERVER_ROOT_URL: http://127.0.0.1:${GRAFANA_PORT:-3001}/
       GF_LIVE_ALLOWED_ORIGINS: http://127.0.0.1:${GRAFANA_PORT:-3001}
       GOMEMLIMIT: 320MiB  # ép Go GC trước khi chạm mem_limit
+    secrets:
+      - grafana_admin_password
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -466,12 +480,14 @@ services:
       WORDPRESS_DB_HOST: ${WORDPRESS_DB_HOST:-db:3306}
       WORDPRESS_DB_NAME: ${MYSQL_DATABASE}
       WORDPRESS_DB_USER: ${MYSQL_USER}
-      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD}
+      WORDPRESS_DB_PASSWORD_FILE: /run/secrets/mysql_password
       WP_SITE_URL: https://localhost:${NGINX_HTTPS_PORT:-8443}
       WP_SITE_TITLE: ${WP_SITE_TITLE:-PhucTech Smart Home}
       WP_ADMIN_USER: ${WP_ADMIN_USER:?đặt trong .env}
-      WP_ADMIN_PASSWORD: ${WP_ADMIN_PASSWORD:?đặt trong .env}
       WP_ADMIN_EMAIL: ${WP_ADMIN_EMAIL:?đặt trong .env}
+    secrets:
+      - mysql_password
+      - wp_admin_password   # seed.sh đọc qua stdin (--prompt=admin_password)
     volumes:
       - wp_html:/var/www/html
       - ./seed:/seed:ro
@@ -482,17 +498,31 @@ services:
     mem_limit: 512m
     entrypoint: ["sh", "/seed/seed.sh"]
 
+# Subnet cố định (10.250.0.0/16 không trùng LAN 192.168.1.0/24, tailscale 100.64/10, bridge 172.x):
+# grant DB theo subnet backend và allowlist Nginx theo subnet/gateway cần địa chỉ không đổi giữa các lần up.
 networks:
   frontend:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 10.250.10.0/24
   backend:
     driver: bridge
     internal: true
+    ipam:
+      config:
+        - subnet: ${BACKEND_SUBNET:-10.250.20.0/24}   # cũng là DB_CLIENT_SUBNET của db
   egress:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 10.250.50.0/24
   monitoring:
     driver: bridge
     internal: true
+    ipam:
+      config:
+        - subnet: 10.250.30.0/24
   # Chỉ docker-socket-proxy và promtail; subnet cố định để proxy allowlist theo CIDR.
   dockerapi:
     driver: bridge
@@ -501,12 +531,24 @@ networks:
       config:
         - subnet: 10.250.250.0/29
 
-configs:
+# File trong secrets/ (thư mục 700, file 644) do scripts/gen-secrets.sh tạo; không commit.
+secrets:
+  mysql_root_password:
+    file: ./secrets/mysql_root_password
+  mysql_password:
+    file: ./secrets/mysql_password
+  mysql_exporter_password:
+    file: ./secrets/mysql_exporter_password
+  wp_admin_password:
+    file: ./secrets/wp_admin_password
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password
   mysqld_exporter_cnf:
-    content: |
-      [client]
-      user=${MYSQL_EXPORTER_USER}
-      password=${MYSQL_EXPORTER_PASSWORD}
+    file: ./secrets/mysqld-exporter.cnf
+  tls_key:
+    file: ./secrets/server.key
+  nginx_htpasswd:
+    file: ./secrets/htpasswd
 
 volumes:
   db_data:

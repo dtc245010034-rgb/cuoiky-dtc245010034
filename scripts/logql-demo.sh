@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Chạy các truy vấn LogQL mẫu qua Nginx (127.0.0.1:3100, Basic Auth lấy từ .env) và in kết quả rút gọn.
+# Chạy các truy vấn LogQL mẫu qua Nginx (127.0.0.1:3100, Basic Auth: user trong .env, mật khẩu trong secrets/monitor_basic_password) và in kết quả rút gọn.
 # Dùng sau khi sinh dữ liệu: scripts/load.sh 2 và vài lần đăng nhập sai/đúng vào /wp-login.php.
 # Tham số: $1 = khoảng thời gian tính ngược (mặc định 1h).
 set -euo pipefail
@@ -7,7 +7,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 [[ -f .env ]] || { echo "Thiếu .env" >&2; exit 1; }
 user=$(grep -E '^MONITOR_BASIC_USER=' .env | head -1 | cut -d= -f2-)
-pass=$(grep -E '^MONITOR_BASIC_PASSWORD=' .env | head -1 | cut -d= -f2-)
+[[ -f secrets/monitor_basic_password ]] || { echo "Thiếu secrets/monitor_basic_password (chạy scripts/gen-secrets.sh)" >&2; exit 1; }
+pass=$(< secrets/monitor_basic_password)
 port=$(grep -E '^LOKI_PORT=' .env | head -1 | cut -d= -f2-)
 base="http://127.0.0.1:${port:-3100}"
 range="${1:-1h}"
